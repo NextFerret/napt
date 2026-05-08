@@ -1,0 +1,13 @@
+The NextFerret Linux License (TNLL) 1.0
+​Copyright (c) 2026 NextFerret Organization and Zeon (zeon-nf, zeonmbl_nf)
+​Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, subject to the following conditions:
+​1. Copyleft and Derivative Works
+​Any person or entity that modifies, forks, or builds upon this Software must ensure that the resulting work is also licensed under the TNLL 1.0. You may not distribute, license, or sell any derivative version of this Software under proprietary or closed-source terms. All "forks" must remain Free and Open Source Software (FOSS).
+​2. Network and SaaS Usage
+​If you run a modified version of this Software on a server and provide services to users over a network (Software as a Service), you must make the complete source code of that modified version available to those users at no charge. Failure to disclose the source code for network-based usage is a violation of this license.
+​3. Preservation of Notices
+​The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+​4. Age Restrictions and Jurisdictional Compliance
+​Notice: NextFerret Linux and the authors of this Software are not responsible for the use, distribution, or deployment of this Software in jurisdictions where age-restricted access laws or regulations apply. It is the sole responsibility of the user to ensure compliance with local laws regarding age requirements.
+​5. Disclaimer of Warranty
+​THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

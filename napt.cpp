@@ -16,6 +16,9 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <thread>
+#include <atomic>
+#include <chrono>
 #include <apt-pkg/init.h>
 #include <apt-pkg/configuration.h>
 #include <apt-pkg/pkgsystem.h>
@@ -89,15 +92,15 @@ void show_help() {
     cout << "New Advanced Packaging Tool - napt 2.0\n\n"
          << "Usage: napt [command] [options]\n\n"
          << "Commands:\n"
-         << "  install          Installs packages in a sandbox; applies to host only if successful.\n"
-         << "  remove           Removes packages in a sandbox; applies to host only if successful.\n"
+         << "  install          Installs packages or local .deb files in a chroot; applies to host only if successful.\n"
+         << "  remove           Removes packages in a chroot; applies to host only if successful.\n"
          << "  sync             Updates repository metadata.\n"
-         << "  upgrade          Upgrades all packages, or selected packages, using the sandbox-first method.\n"
+         << "  upgrade          Upgrades all packages, or selected packages, using the chroot-first method.\n"
          << "  dist-upgrade     Full release upgrade\n"
          << "  purge            Removes packages and their configuration files.\n"
          << "  clean            Cleans the Napt download cache.\n\n"
          << "Options:\n"
-         << "  --apply-host     Skip the sandbox and apply changes directly to the host.\n"
+         << "  --apply-host     Skip the chroot and apply changes directly to the host.\n"
          << "  --v              Show version information.\n"
          << "  --vb             Enable verbose logging for debugging libapt transactions.\n"
          << "  -h               Show this help message.\n\n"
@@ -824,6 +827,39 @@ string build_apt_install_args_cmd(const vector<string>& args, bool quiet) {
     return cmd;
 }
 
+struct DebFileInfo {
+    string package_name;
+    string version;
+    string architecture;
+};
+
+bool get_deb_file_info(const string& path, DebFileInfo& info) {
+    string cmd = "dpkg-deb --field " + shell_quote(path) + " Package Version Architecture 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return false;
+
+    char buffer[256];
+    string output;
+    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+        output += buffer;
+    }
+    int rc = pclose(pipe);
+    if (rc == -1 || !(WIFEXITED(rc) && WEXITSTATUS(rc) == 0)) return false;
+
+    istringstream ss(output);
+    string line;
+    while (getline(ss, line)) {
+        size_t colon = line.find(':');
+        if (colon == string::npos) continue;
+        string key   = trim_copy(line.substr(0, colon));
+        string value = trim_copy(line.substr(colon + 1));
+        if (key == "Package")      info.package_name = value;
+        else if (key == "Version") info.version      = value;
+        else if (key == "Architecture") info.architecture = value;
+    }
+    return !info.package_name.empty();
+}
+
 bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecision>& decisions, bool quiet) {
     if (pkgs.empty()) {
         if (!quiet) {
@@ -837,6 +873,39 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
     bool had_error = false;
 
     for (const auto& pkg_name : pkgs) {
+        if (ends_with(pkg_name, ".deb")) {
+            if (!path_is_regular_file(pkg_name)) {
+                if (!quiet) {
+                    cout << "Local .deb file not found: " << pkg_name << "\n";
+                }
+                had_error = true;
+                continue;
+            }
+
+            DebFileInfo deb_info;
+            bool has_info = get_deb_file_info(pkg_name, deb_info);
+
+            if (!quiet) {
+                cout << "Installing local .deb: ";
+                if (has_info) {
+                    cout << deb_info.package_name;
+                    if (!deb_info.version.empty())      cout << " (" << deb_info.version << ")";
+                    if (!deb_info.architecture.empty()) cout << " [" << deb_info.architecture << "]";
+                } else {
+                    cout << pkg_name;
+                }
+                cout << "\n";
+            }
+
+            InstallDecision decision;
+            decision.package_name   = has_info ? deb_info.package_name : pkg_name;
+            decision.apt_argument   = pkg_name;
+            decision.selected_version = has_info ? deb_info.version : "";
+            decision.from_napt      = false;
+            decisions.push_back(decision);
+            continue;
+        }
+
         AptPackageState apt_state = get_apt_package_state(cache_file, pkg_name);
         NaptPackageCandidate napt_candidate = find_best_napt_candidate(repos, pkg_name);
 
@@ -1009,39 +1078,163 @@ bool do_command_transaction(const string& cmd) {
     return run_cmd(cmd) == 0;
 }
 
+static const int PROGRESS_BAR_WIDTH = 18;
+
+static string format_remaining(double seconds) {
+    int s = static_cast<int>(seconds);
+    if (s <= 0) return "0s";
+    if (s < 60) return to_string(s) + "s";
+    int m = s / 60;
+    int r = s % 60;
+    return to_string(m) + "m " + to_string(r) + "s";
+}
+
+static void render_chroot_bar(int filled, const string& time_str) {
+    string bar(filled, '#');
+    bar += string(PROGRESS_BAR_WIDTH - filled, ' ');
+    string line = "\rTesting on the chroot                        ["
+                  + bar + "] Estimated Time:" + time_str;
+    line += string(max(0, 20 - static_cast<int>(time_str.size())), ' ');
+    cout << line;
+    cout.flush();
+}
+
 void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
     if (!apply_host) {
         manage_sandbox("create");
         mount_fs();
+
+        int apt_pipe[2] = {-1, -1};
+        bool have_pipe = (pipe(apt_pipe) == 0);
+
         pid_t pid = fork();
         if (pid == 0) {
             if (chroot(TREE_ROOT.c_str()) != 0 || chdir("/") != 0) {
                 exit(1);
             }
+
             int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
             if (null_fd != -1) {
                 dup2(null_fd, STDOUT_FILENO);
                 dup2(null_fd, STDERR_FILENO);
                 close(null_fd);
             }
+
+            if (have_pipe) {
+                close(apt_pipe[0]);
+                if (apt_pipe[1] != 3) {
+                    dup2(apt_pipe[1], 3);
+                    close(apt_pipe[1]);
+                }
+                fcntl(3, F_SETFD, 0);
+            }
+
             pkgInitConfig(*_config);
             pkgInitSystem(*_config, _system);
-            bool res = do_command_transaction(transaction_cmd);
+            string cmd = transaction_cmd;
+            if (have_pipe) cmd += " -o APT::Status-Fd=3";
+            bool res = do_command_transaction(cmd);
             exit(res ? 0 : 1);
+
         } else if (pid > 0) {
+            if (have_pipe) close(apt_pipe[1]);
+
+            std::atomic<double> apt_percent(0.0);
+            std::atomic<bool>   display_done(false);
+
+            std::thread reader_thread([&]() {
+                if (!have_pipe) return;
+                FILE* f = fdopen(apt_pipe[0], "r");
+                if (!f) { close(apt_pipe[0]); return; }
+                char line[512];
+                while (fgets(line, sizeof(line), f) != NULL) {
+                    string s(line);
+                    bool is_pm = (s.size() > 9 && s.substr(0, 9) == "pmstatus:");
+                    bool is_dl = (!is_pm && s.size() > 9 && s.substr(0, 9) == "dlstatus:");
+                    if (!is_pm && !is_dl) continue;
+                    size_t c1 = s.find(':');
+                    if (c1 == string::npos) continue;
+                    size_t c2 = s.find(':', c1 + 1);
+                    if (c2 == string::npos) continue;
+                    size_t c3 = s.find(':', c2 + 1);
+                    if (c3 == string::npos) continue;
+                    string pct_str = s.substr(c2 + 1, c3 - c2 - 1);
+                    try {
+                        double pct = stod(pct_str);
+                        if (pct > apt_percent.load()) {
+                            apt_percent.store(pct);
+                        }
+                    } catch (...) {}
+                }
+                fclose(f);
+            });
+
+            std::thread display_thread([&]() {
+                auto start = std::chrono::steady_clock::now();
+                while (!display_done.load()) {
+                    double pct = apt_percent.load();
+                    auto now = std::chrono::steady_clock::now();
+                    double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() / 1000.0;
+
+                    int filled;
+                    string time_str;
+
+                    if (have_pipe) {
+                        filled = static_cast<int>((pct / 100.0) * PROGRESS_BAR_WIDTH);
+                        filled = min(filled, PROGRESS_BAR_WIDTH - 1);
+                        if (pct > 2.0 && elapsed > 1.0) {
+                            double remaining = elapsed * (100.0 - pct) / pct;
+                            time_str = format_remaining(remaining);
+                        } else {
+                            time_str = "estimating...";
+                        }
+                    } else {
+                        filled = min(PROGRESS_BAR_WIDTH - 1,
+                                     static_cast<int>(elapsed / 120.0 * PROGRESS_BAR_WIDTH));
+                        double remaining = max(0.0, 120.0 - elapsed);
+                        time_str = format_remaining(remaining);
+                    }
+
+                    render_chroot_bar(filled, time_str);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+            });
+
             int status = 0;
             bool waited = wait_for_child(pid, status);
+
+            display_done.store(true);
+            display_thread.join();
+            reader_thread.join();
+
+            int filled_final;
+            {
+                double pct = apt_percent.load();
+                filled_final = static_cast<int>((pct / 100.0) * PROGRESS_BAR_WIDTH);
+                filled_final = min(filled_final, PROGRESS_BAR_WIDTH - 1);
+            }
+
             umount_fs();
             manage_sandbox("delete");
+
             if (!waited) {
-                cout << "Sandbox test interrupted. Aborting transaction.\n";
+                string bar(filled_final, '#');
+                bar += string(PROGRESS_BAR_WIDTH - filled_final, ' ');
+                cout << "\rTesting on the chroot                        ["
+                     << bar << "]                           ...  chroot test interrupted.\n";
                 return;
             }
             if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-                cout << "Sandbox test failed. Aborting transaction.\n";
+                string bar(filled_final, '#');
+                bar += string(PROGRESS_BAR_WIDTH - filled_final, ' ');
+                cout << "\rTesting on the chroot                        ["
+                     << bar << "]                           ...  chroot test failed.\n";
                 return;
             }
-            cout << "Sandbox test successful. Applying to host...\n";
+            string full_bar(PROGRESS_BAR_WIDTH, '#');
+            cout << "\rTesting on the chroot                        ["
+                 << full_bar << "] Estimated Time:done          \n";
+            cout << "Chroot test successful. Applying to host...\n";
             cout << "Do you want to apply the transaction to the host system?\n";
             cout << "This action cannot be undone without rollback if it fails.\n";
             cout << "Type 'yes' to confirm or anything else to abort: ";
@@ -1052,7 +1245,8 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
                 return;
             }
         } else {
-            cout << "Fork failed for sandbox test.\n";
+            if (have_pipe) { close(apt_pipe[0]); close(apt_pipe[1]); }
+            cout << "Fork failed for chroot test.\n";
             return;
         }
     }

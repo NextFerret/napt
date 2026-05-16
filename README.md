@@ -8,7 +8,7 @@
 The core philosophy of `napt` is **system safety**: operations are performed in a controlled sandbox environment and are only committed to the host system once the transaction is verified as successful.
 
 ## Key Features
-* **Sandbox-First Execution:** Installs, removals, and upgrades are tested in an isolated environment before affecting the host.
+* **Chroot-First Execution:** Installs, removals, and upgrades are tested in an isolated environment before affecting the host.
 * **C++ Core:** High performance and low memory overhead.
 * **Enhanced Syntax:** Simplified commands for modern Linux workflows.
 * **Custom Repository Support:** Easily extend your software sources via standard list files.

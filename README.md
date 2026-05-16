@@ -24,8 +24,8 @@ napt [command] [options]
 ### Commands
 | Command | Description |
 | :--- | :--- |
-| `install` | Installs packages in a sandbox; syncs to host only on success. |
-| `remove` | Removes packages in a sandbox; syncs to host only on success. |
+| `install` | Installs packages in a chroot; syncs to host only on success. |
+| `remove` | Removes packages in a chroot; syncs to host only on success. |
 | `sync` | Updates local repository metadata. |
 | `upgrade` | Upgrades specific or all packages using the sandbox-first method. |
 | `dist-upgrade` | Performs a full distribution release upgrade. |

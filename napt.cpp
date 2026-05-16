@@ -1099,6 +1099,38 @@ static void render_chroot_bar(int filled, const string& time_str) {
     cout.flush();
 }
 
+static string rewrite_cmd_stage_debs(const string& cmd, vector<string>& staged_host_paths) {
+    string result;
+    size_t i = 0;
+    while (i < cmd.size()) {
+        if (cmd[i] == '\'') {
+            size_t end = cmd.find('\'', i + 1);
+            if (end == string::npos) { result += cmd.substr(i); break; }
+            string token = cmd.substr(i + 1, end - i - 1);
+            if (token.size() > 4 && token.substr(token.size() - 4) == ".deb") {
+                string filename = token.substr(token.find_last_of('/') + 1);
+                string chroot_tmp_host = TREE_ROOT + "/tmp/" + filename;
+                string chroot_tmp_inner = "/tmp/" + filename;
+                run_cmd("cp " + shell_quote(token) + " " + shell_quote(chroot_tmp_host));
+                staged_host_paths.push_back(chroot_tmp_host);
+                result += "'" + chroot_tmp_inner + "'";
+            } else {
+                result += cmd.substr(i, end - i + 1);
+            }
+            i = end + 1;
+        } else {
+            result += cmd[i++];
+        }
+    }
+    return result;
+}
+
+static void cleanup_staged_debs(const vector<string>& staged_host_paths) {
+    for (const auto& p : staged_host_paths) {
+        run_cmd("rm -f " + shell_quote(p));
+    }
+}
+
 void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
     if (!apply_host) {
         manage_sandbox("create");
@@ -1107,17 +1139,32 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
         int apt_pipe[2] = {-1, -1};
         bool have_pipe = (pipe(apt_pipe) == 0);
 
+        int err_pipe[2] = {-1, -1};
+        bool have_err_pipe = (pipe2(err_pipe, O_CLOEXEC) == 0);
+
+        vector<string> staged_debs;
+        string chroot_cmd = rewrite_cmd_stage_debs(transaction_cmd, staged_debs);
+
         pid_t pid = fork();
         if (pid == 0) {
             if (chroot(TREE_ROOT.c_str()) != 0 || chdir("/") != 0) {
+                if (have_err_pipe) {
+                    string msg = "chroot/chdir failed\n";
+                    write(err_pipe[1], msg.c_str(), msg.size());
+                }
                 exit(1);
             }
 
-            int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (null_fd != -1) {
-                dup2(null_fd, STDOUT_FILENO);
-                dup2(null_fd, STDERR_FILENO);
-                close(null_fd);
+            dup2(open("/dev/null", O_WRONLY | O_CLOEXEC), STDOUT_FILENO);
+
+            if (have_err_pipe) {
+                close(err_pipe[0]);
+                if (err_pipe[1] != STDERR_FILENO) {
+                    dup2(err_pipe[1], STDERR_FILENO);
+                    close(err_pipe[1]);
+                }
+            } else {
+                dup2(open("/dev/null", O_WRONLY | O_CLOEXEC), STDERR_FILENO);
             }
 
             if (have_pipe) {
@@ -1131,16 +1178,29 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
 
             pkgInitConfig(*_config);
             pkgInitSystem(*_config, _system);
-            string cmd = transaction_cmd;
+            string cmd = chroot_cmd;
             if (have_pipe) cmd += " -o APT::Status-Fd=3";
             bool res = do_command_transaction(cmd);
             exit(res ? 0 : 1);
 
         } else if (pid > 0) {
-            if (have_pipe) close(apt_pipe[1]);
+            if (have_pipe)     close(apt_pipe[1]);
+            if (have_err_pipe) close(err_pipe[1]);
 
             std::atomic<double> apt_percent(0.0);
             std::atomic<bool>   display_done(false);
+            string child_stderr_output;
+
+            std::thread stderr_reader([&]() {
+                if (!have_err_pipe) return;
+                char buf[256];
+                ssize_t n;
+                while ((n = read(err_pipe[0], buf, sizeof(buf) - 1)) > 0) {
+                    buf[n] = '\0';
+                    child_stderr_output += buf;
+                }
+                close(err_pipe[0]);
+            });
 
             std::thread reader_thread([&]() {
                 if (!have_pipe) return;
@@ -1206,6 +1266,7 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
             display_done.store(true);
             display_thread.join();
             reader_thread.join();
+            stderr_reader.join();
 
             int filled_final;
             {
@@ -1215,6 +1276,7 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
             }
 
             umount_fs();
+            cleanup_staged_debs(staged_debs);
             manage_sandbox("delete");
 
             if (!waited) {
@@ -1229,6 +1291,11 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
                 bar += string(PROGRESS_BAR_WIDTH - filled_final, ' ');
                 cout << "\rTesting on the chroot                        ["
                      << bar << "]                           ...  chroot test failed.\n";
+                if (!child_stderr_output.empty()) {
+                    cout << "\n--- chroot apt error ---\n" << child_stderr_output;
+                    if (child_stderr_output.back() != '\n') cout << '\n';
+                    cout << "------------------------\n";
+                }
                 return;
             }
             string full_bar(PROGRESS_BAR_WIDTH, '#');
@@ -1245,7 +1312,8 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
                 return;
             }
         } else {
-            if (have_pipe) { close(apt_pipe[0]); close(apt_pipe[1]); }
+            if (have_pipe)     { close(apt_pipe[0]); close(apt_pipe[1]); }
+            if (have_err_pipe) { close(err_pipe[0]); close(err_pipe[1]); }
             cout << "Fork failed for chroot test.\n";
             return;
         }

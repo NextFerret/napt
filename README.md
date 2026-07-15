@@ -5,7 +5,7 @@
 
 
 
-napt is an testing package manager (or wrapper?)  for The Arvor Project. it uses chroots to test the packages into  an sandbox. of course that takes time. thats why you have --apply-host
+napt is an package manager for The Arvor Project. it uses chroots to test the packages into  an sandbox. of course that takes time. thats why you have --apply-host
 
 but anyway,
 
